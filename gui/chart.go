@@ -35,8 +35,11 @@ type Chart struct {
 	firstX     float32      // Value for the first x label
 	stepX      float32      // Step for the next x label
 	countStepX float32      // Number of values per x step
+	minX       float32      // Minimum X value
+	maxX       float32      // Maximum X value
 	minY       float32      // Minimum Y value
 	maxY       float32      // Maximum Y value
+	autoX      bool         // Auto range flag for X values
 	autoY      bool         // Auto range flag for Y values
 	formatX    string       // String format for scale X labels
 	formatY    string       // String format for scale Y labels
@@ -76,6 +79,7 @@ func (ch *Chart) Init(width float32, height float32) {
 	ch.countStepX = 1
 	ch.minY = -10.0
 	ch.maxY = 10.0
+	ch.autoX = false
 	ch.autoY = false
 	ch.formatX = "%v"
 	ch.formatY = "%v"
@@ -265,6 +269,17 @@ func (ch *Chart) SetRangeX(firstX float32, stepX float32, countStepX float32) {
 	ch.updateGraphs()
 }
 
+// SetRangeX sets the minimum and maximum values of the x scale of a scatter graph
+func (ch *Chart) SetRangeScatterX(min float32, max float32) {
+
+	if ch.autoX {
+		return
+	}
+	ch.minX = min
+	ch.maxX = max
+	ch.updateGraphs()
+}
+
 // SetRangeY sets the minimum and maximum values of the y scale
 func (ch *Chart) SetRangeY(min float32, max float32) {
 
@@ -273,6 +288,16 @@ func (ch *Chart) SetRangeY(min float32, max float32) {
 	}
 	ch.minY = min
 	ch.maxY = max
+	ch.updateGraphs()
+}
+
+// SetRangeYauto sets the state of the auto
+func (ch *Chart) SetRangeXauto(auto bool) {
+
+	ch.autoX = auto
+	if !auto {
+		return
+	}
 	ch.updateGraphs()
 }
 
@@ -286,6 +311,12 @@ func (ch *Chart) SetRangeYauto(auto bool) {
 	ch.updateGraphs()
 }
 
+// RangeX returns the current x range
+func (ch *Chart) RangeX() (minX, maxY float32) {
+
+	return ch.minY, ch.maxY
+}
+
 // RangeY returns the current y range
 func (ch *Chart) RangeY() (minY, maxY float32) {
 
@@ -296,6 +327,17 @@ func (ch *Chart) RangeY() (minY, maxY float32) {
 func (ch *Chart) AddLineGraph(color *math32.Color, data []float32) *Graph {
 
 	graph := newGraph(ch, color, data)
+	ch.graphs = append(ch.graphs, graph)
+	ch.Add(graph)
+	ch.recalc()
+	ch.updateGraphs()
+	return graph
+}
+
+// AddScatterGraph adds a scatter graph to the chart
+func (ch *Chart) AddScatterGraph(color *math32.Color, dataX, dataY []float32) *Graph {
+
+	graph := newScatter(ch, color, dataX, dataY)
 	ch.graphs = append(ch.graphs, graph)
 	ch.Add(graph)
 	ch.recalc()
@@ -316,7 +358,7 @@ func (ch *Chart) RemoveGraph(g *Graph) {
 			break
 		}
 	}
-	if !ch.autoY {
+	if !ch.autoY && !ch.autoX {
 		return
 	}
 	ch.updateGraphs()
@@ -378,8 +420,8 @@ func (ch *Chart) calcRangeY() {
 	maxY := -float32(math.MaxFloat32)
 	for g := 0; g < len(ch.graphs); g++ {
 		graph := ch.graphs[g]
-		for x := 0; x < len(graph.data); x++ {
-			vy := graph.data[x]
+		for x := 0; x < len(graph.dataY); x++ {
+			vy := graph.dataY[x]
 			if vy < minY {
 				minY = vy
 			}
@@ -609,24 +651,26 @@ func (sy *chartScaleY) RenderSetup(gs *gls.GLS, rinfo *core.RenderInfo) {
 // A Chart has an array of Graph objects.
 //
 type Graph struct {
-	Panel                   // Embedded panel
-	chart     *Chart        // Container chart
-	color     math32.Color  // Line color
-	data      []float32     // Data y
-	mat       chartMaterial // Chart material
-	vbo       *gls.VBO
-	positions math32.ArrayF32
-	uniBounds gls.Uniform // Bounds uniform location cache
+	Panel                      // Embedded panel
+	chart        *Chart        // Container chart
+	color        math32.Color  // Line color
+	scatterGraph bool          //flag indicating scatter graphe (true) or line graph (false)
+	dataX        []float32     // Data x
+	dataY        []float32     // Data y
+	mat          chartMaterial // Chart material
+	vbo          *gls.VBO
+	positions    math32.ArrayF32
+	uniBounds    gls.Uniform // Bounds uniform location cache
 }
 
-// newGraph creates and returns a pointer to a new graph for the specified chart
+// newGraph creates and returns a pointer to a new line graph for the specified chart
 func newGraph(chart *Chart, color *math32.Color, data []float32) *Graph {
 
 	lg := new(Graph)
 	lg.uniBounds.Init("Bounds")
 	lg.chart = chart
 	lg.color = *color
-	lg.data = data
+	lg.scatterGraph = false
 
 	// Creates geometry and adds VBO with positions
 	geom := geometry.NewGeometry()
@@ -640,7 +684,39 @@ func newGraph(chart *Chart, color *math32.Color, data []float32) *Graph {
 	gr.AddMaterial(lg, &lg.mat, 0, 0)
 	lg.Panel.InitializeGraphic(lg.chart.ContentWidth(), lg.chart.ContentHeight(), gr)
 
-	lg.SetData(data)
+	lg.SetDataY(data)
+	return lg
+}
+
+// newScatter creates and returns a pointer to a new scatter graph for the specified chart
+// dataX and dataY should have the same length
+func newScatter(chart *Chart, color *math32.Color, dataX, dataY []float32) *Graph {
+	if len(dataX) != len(dataY) {
+		err := fmt.Errorf("dataX (len %v) and dataY (len %v) should have the same length", len(dataX), len(dataY))
+		panic(err)
+	}
+
+	lg := new(Graph)
+	lg.uniBounds.Init("Bounds")
+	lg.chart = chart
+	lg.color = *color
+	lg.scatterGraph = false
+
+	// Creates geometry and adds VBO with positions
+	geom := geometry.NewGeometry()
+	lg.positions = math32.NewArrayF32(0, 0)
+	lg.vbo = gls.NewVBO(lg.positions).AddAttrib(gls.VertexPosition)
+	geom.AddVBO(lg.vbo)
+
+	// Initializes the panel with this graphic
+	gr := graphic.NewGraphic(lg, geom, gls.LINE_STRIP)
+	lg.mat.Init(&lg.color)
+	gr.AddMaterial(lg, &lg.mat, 0, 0)
+	lg.Panel.InitializeGraphic(lg.chart.ContentWidth(), lg.chart.ContentHeight(), gr)
+
+	lg.scatterGraph = true
+	lg.SetDataY(dataY)
+	lg.SetDataX(dataX)
 	return lg
 }
 
@@ -650,11 +726,40 @@ func (lg *Graph) SetColor(color *math32.Color) {
 	lg.color = *color
 }
 
-// SetData sets the graph data
+// SetDataX sets the graph X data
+func (lg *Graph) SetDataX(dataX []float32) {
+	if len(lg.dataY) > 0 && len(dataX) != len(lg.dataY) {
+		err := fmt.Errorf("dataX (len %v) should be the same size as dataY (len %v)", len(dataX), len(lg.dataY))
+		panic(err)
+	}
+
+	if !lg.scatterGraph {
+		lg.scatterGraph = true
+	}
+
+	lg.dataX = dataX
+	lg.updateData()
+}
+
+// SetDataY sets the graph Y data
+func (lg *Graph) SetDataY(dataY []float32) {
+
+	if lg.scatterGraph {
+		if len(lg.dataX) > 0 && len(dataY) != len(lg.dataX) {
+			err := fmt.Errorf("dataY (len %v) should be the same size as dataX (len %v)", len(dataY), len(lg.dataX))
+			panic(err)
+		}
+	}
+
+	lg.dataY = dataY
+	lg.updateData()
+}
+
+// SetData  sets the graph Y data
+// deprecated, use SetDataY
 func (lg *Graph) SetData(data []float32) {
 
-	lg.data = data
-	lg.updateData()
+	lg.SetDataY(data)
 }
 
 // SetLineWidth sets the graph line width
@@ -666,17 +771,24 @@ func (lg *Graph) SetLineWidth(width float32) {
 // updateData regenerates the lines for the current data
 func (lg *Graph) updateData() {
 
-	lines := 1
-	if lg.chart.scaleX != nil {
-		lines = lg.chart.scaleX.lines
+	if !lg.scatterGraph {
+		lines := 1
+		if lg.chart.scaleX != nil {
+			lines = lg.chart.scaleX.lines
+		}
+		step := 1.0 / (float32(lines) * lg.chart.countStepX)
+		for i := 0; i < len(lg.dataY); i++ {
+			lg.dataX = append(lg.dataX, step*float32(i))
+		}
 	}
-	step := 1.0 / (float32(lines) * lg.chart.countStepX)
 
 	positions := math32.NewArrayF32(0, 0)
+	rangeX := lg.chart.maxX - lg.chart.minX
 	rangeY := lg.chart.maxY - lg.chart.minY
-	for i := 0; i < len(lg.data); i++ {
-		px := float32(i) * step
-		vy := lg.data[i]
+	for i := 0; i < len(lg.dataY); i++ {
+		vx := lg.dataX[i]
+		px := -1 + ((vx - lg.chart.minX) / rangeX)
+		vy := lg.dataY[i]
 		py := -1 + ((vy - lg.chart.minY) / rangeY)
 		positions.Append(px, py, 0)
 	}
